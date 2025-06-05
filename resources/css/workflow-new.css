@@ -1,0 +1,278 @@
+/* Workflow Builder Styles */
+.workflow-builder {
+    @apply h-full w-full bg-background;
+}
+
+.workflow-builder .react-flow__node {
+    @apply transition-all duration-200;
+}
+
+.workflow-builder .react-flow__node:hover {
+    @apply scale-[1.02];
+}
+
+.workflow-builder .react-flow__handle {
+    width: 0.75rem !important;
+    height: 0.75rem !important;
+    border-radius: 9999px !important;
+    border: 2px solid white !important;
+    @apply transition-all duration-200;
+}
+
+.workflow-builder .react-flow__handle:hover {
+    transform: scale(1.1) !important;
+}
+
+.workflow-builder .react-flow__handle-top {
+    background-color: rgb(156 163 175) !important;
+}
+
+.workflow-builder .react-flow__handle-bottom {
+    background-color: rgb(156 163 175) !important;
+}
+
+.workflow-builder .react-flow__handle-bottom[data-handleid="yes"] {
+    background-color: rgb(34 197 94) !important;
+}
+
+.workflow-builder .react-flow__handle-bottom[data-handleid="no"] {
+    background-color: rgb(239 68 68) !important;
+}
+
+.workflow-builder .react-flow__edge-path {
+    stroke-width: 2px !important;
+    @apply transition-all duration-200;
+}
+
+.workflow-builder .react-flow__edge:hover .react-flow__edge-path {
+    stroke-width: 3px !important;
+}
+
+.workflow-builder .react-flow__controls {
+    background-color: white !important;
+    border: 1px solid rgb(229 231 235);
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+.workflow-builder .react-flow__controls-button {
+    border: none !important;
+    background: transparent !important;
+    width: 2rem !important;
+    height: 2rem !important;
+    @apply flex items-center justify-center hover:bg-gray-50;
+}
+
+.workflow-builder .react-flow__controls-button svg {
+    fill: rgb(75 85 99) !important;
+}
+
+.workflow-builder .react-flow__minimap {
+    background-color: white !important;
+    border: 1px solid rgb(229 231 235);
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+.workflow-builder .react-flow__background {
+    background-image: radial-gradient(rgb(226 232 240) 1px, transparent 0) !important;
+    background-size: 20px 20px !important;
+}
+
+/* Node Styles */
+.workflow-node {
+    @apply min-w-[280px] rounded-lg border p-4 text-left transition-all duration-200;
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+.workflow-node:hover {
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+
+.workflow-node-trigger {
+    @apply border-green-500/50 bg-green-50/50;
+}
+
+.workflow-node-action {
+    @apply border-blue-500/50 bg-blue-50/50;
+}
+
+.workflow-node-ifelse {
+    @apply border-orange-500/50 bg-orange-50/50;
+}
+
+.workflow-node-add {
+    @apply border-dashed border-gray-300 bg-white hover:border-primary hover:bg-primary/5;
+}
+
+.workflow-node-icon {
+    @apply rounded-lg p-2;
+}
+
+.workflow-node-trigger .workflow-node-icon {
+    @apply bg-green-100 text-green-600;
+}
+
+.workflow-node-action .workflow-node-icon {
+    @apply bg-blue-100 text-blue-600;
+}
+
+.workflow-node-ifelse .workflow-node-icon {
+    @apply bg-orange-100 text-orange-600;
+}
+
+.workflow-node-add .workflow-node-icon {
+    @apply bg-gray-100 text-gray-600;
+}
+
+.workflow-node-title {
+    @apply font-medium text-base;
+}
+
+.workflow-node-trigger .workflow-node-title {
+    @apply text-green-700;
+}
+
+.workflow-node-action .workflow-node-title {
+    @apply text-blue-700;
+}
+
+.workflow-node-ifelse .workflow-node-title {
+    @apply text-orange-700;
+}
+
+.workflow-node-add .workflow-node-title {
+    @apply text-gray-600;
+}
+
+.workflow-node-description {
+    @apply mt-1 text-sm max-w-[200px] truncate;
+}
+
+.workflow-node-trigger .workflow-node-description {
+    @apply text-green-600/75;
+}
+
+.workflow-node-action .workflow-node-description {
+    @apply text-blue-600/75;
+}
+
+.workflow-node-ifelse .workflow-node-description {
+    @apply text-orange-600/75;
+}
+
+.workflow-branch-label {
+    @apply absolute -bottom-7 text-sm font-medium px-2 py-0.5 rounded-full border bg-white;
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+.workflow-branch-label-yes {
+    @apply left-[20%] text-green-600 border-green-200;
+}
+
+.workflow-branch-label-no {
+    @apply right-[20%] text-red-600 border-red-200;
+}
+
+/* Sidebar Styles */
+.workflow-sidebar {
+    @apply fixed right-0 top-0 h-full w-96 border-l border-gray-200 bg-white overflow-y-auto z-50;
+    box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+
+.workflow-sidebar-header {
+    @apply sticky top-0 z-10 bg-white pb-4 border-b border-gray-200;
+}
+
+.workflow-sidebar-content {
+    @apply p-6;
+}
+
+.workflow-sidebar-search {
+    @apply mb-4;
+}
+
+.workflow-sidebar-categories {
+    @apply flex space-x-2 overflow-x-auto pb-2;
+}
+
+.workflow-sidebar-category {
+    @apply whitespace-nowrap;
+}
+
+.workflow-action-list {
+    @apply space-y-4;
+}
+
+.workflow-action-group {
+    @apply space-y-2;
+}
+
+.workflow-action-group-title {
+    @apply text-sm font-medium text-gray-500;
+}
+
+.workflow-action-button {
+    @apply w-full rounded-lg border p-4 text-left transition-all hover:border-primary;
+    box-shadow: none;
+}
+
+.workflow-action-button:hover {
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+
+.workflow-action-button-selected {
+    @apply border-primary bg-primary/5;
+}
+
+.workflow-action-button-content {
+    @apply flex items-start space-x-3;
+}
+
+.workflow-action-icon {
+    @apply rounded-lg bg-primary/10 p-2;
+}
+
+.workflow-action-text {
+    @apply flex-1;
+}
+
+.workflow-action-title {
+    @apply font-medium;
+}
+
+.workflow-action-description {
+    @apply mt-1 text-sm text-muted-foreground;
+}
+
+.workflow-action-check {
+    @apply h-5 w-5 text-primary;
+}
+
+/* Flow Container */
+.workflow-flow-container {
+    @apply h-[calc(100vh-12rem)] w-full rounded-lg border bg-white overflow-hidden;
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+/* Trigger Form */
+.workflow-trigger-form {
+    @apply space-y-6 rounded-lg border bg-card p-6;
+}
+
+.workflow-trigger-form-group {
+    @apply space-y-2;
+}
+
+.workflow-trigger-form-label {
+    @apply text-sm font-medium;
+}
+
+.workflow-trigger-form-input {
+    @apply w-full rounded-md border border-input bg-background px-3 py-2 text-sm;
+}
+
+/* Action Form */
+.workflow-action-form {
+    @apply space-y-6 rounded-lg border bg-card p-6;
+} 
