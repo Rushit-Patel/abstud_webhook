@@ -51,53 +51,30 @@ class AutomationController extends Controller
             }
 
             return response()->json([
-                'meta' => $meta
+                'data' => $meta['pages']
             ]);
         } catch (\Exception $e) {
             return response()->json(['error' => 'Failed to parse integration data'], 500);
         }
     }
 
-    public function facebookForms(Request $request)
+    public function facebookForms(Request $request,$pageId)
     {
-        $pageId = $request->pageId;
-        $accessToken = $request->access_token;
+        $FacebookLeadForm = FacebookLeadForm::select([
+            'form_name as name',
+            'facebook_form_id as id'
+        ])->where('facebook_page_id', $pageId)->get();
 
-        if (!$pageId || !$accessToken) {
-            return response()->json(['error' => 'Page ID and access token are required'], 400);
+        if (!$FacebookLeadForm) {
+            return response()->json(['error' => 'No Facebook Lead Form found'], 404);
         }
 
         try {
-            // Make request to Facebook Graph API to get lead forms
-            $response = Http::get("https://graph.facebook.com/v18.0/{$pageId}/leadgen_forms", [
-                'access_token' => $accessToken,
-                'fields' => 'id,name,status,created_time'
+            return response()->json([
+                'data' => $FacebookLeadForm
             ]);
-
-            if (!$response->successful()) {
-                return response()->json(['error' => 'Failed to fetch forms from Facebook'], $response->status());
-            }
-
-            $forms = $response->json();
-            
-            // Filter only active forms
-            $activeForms = collect($forms['data'] ?? [])
-                ->filter(function ($form) {
-                    return $form['status'] === 'ACTIVE';
-                })
-                ->map(function ($form) {
-                    return [
-                        'id' => $form['id'],
-                        'name' => $form['name'],
-                        'created_time' => $form['created_time']
-                    ];
-                })
-                ->values()
-                ->all();
-
-            return response()->json($activeForms);
         } catch (\Exception $e) {
-            return response()->json(['error' => 'Failed to fetch Facebook forms: ' . $e->getMessage()], 500);
+            return response()->json(['error' => 'Failed to parse lead form data'], 500);
         }
     }
 
