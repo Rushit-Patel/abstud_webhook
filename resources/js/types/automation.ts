@@ -46,11 +46,14 @@ export interface Action {
 }
 
 export interface Workflow {
-  id?: number;
+  id: number;
   name: string;
   is_active: boolean;
   trigger: Trigger;
   actions: Action[];
+  description?: string;
+  total_runs: number;
+  tags: string[];
 }
 
 export interface BranchResult {
