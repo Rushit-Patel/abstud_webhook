@@ -330,10 +330,10 @@ const TriggerSelector: React.FC<TriggerSelectorProps> = ({ selectedTrigger, onCl
     const renderTriggerCard = (trigger: TriggerOption) => (
         <Card
             key={trigger.id}
-            className={`group cursor-pointer transition-all duration-200 hover:scale-[1.02] hover:shadow-lg ${selectedTrigger?.type === trigger.id ? 'bg-blue-50 ring-2 ring-blue-500' : 'hover:bg-gray-50'}`}
+            className={`group py-2 cursor-pointer transition-all duration-200 hover:scale-[1.02] hover:shadow-lg ${selectedTrigger?.type === trigger.id ? 'bg-blue-50 ring-2 ring-blue-500' : 'hover:bg-gray-50'}`}
             onClick={() => handleTriggerSelect(trigger)}
         >
-            <CardContent className="p-4">
+            <CardContent className="p-4 py-2">
                 <div className="flex items-start gap-3">
                     <div
                         className={`rounded-lg p-2 transition-colors group-hover:scale-110 ${trigger.isPremium ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'} `}
@@ -395,7 +395,7 @@ const TriggerSelector: React.FC<TriggerSelectorProps> = ({ selectedTrigger, onCl
                                 </CardTitle>
                                 <CardDescription>Configure which status changes should trigger this workflow</CardDescription>
                             </CardHeader>
-                            <CardContent className="space-y-4">
+                            <CardContent className="space-y-4 p-2">
                                 <div className="flex items-center space-x-2">
                                     <Switch
                                         id="include-any-status"
