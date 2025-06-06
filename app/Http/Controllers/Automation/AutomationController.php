@@ -21,18 +21,6 @@ class AutomationController extends Controller
         ]);
     }
 
-    public function workflows(Request $request)
-    {
-        $workflows = Workflow::query()
-            ->where('user_id', Auth::id());
-            
-        $dataTable = new DataTableService($workflows);
-        $result = $dataTable->setDefaultSort('id', 'desc')
-            ->process($request);
-
-        return response()->json($result);
-    }
-
     public function facebookPages()
     {
         $integration = Integration::where('user_id', Auth::id())
@@ -116,92 +104,5 @@ class AutomationController extends Controller
         } catch (\Exception $e) {
             return response()->json(['error' => 'Failed to fetch form fields: ' . $e->getMessage()], 500);
         }
-    }
-
-    public function store()
-    {
-        $validated = request()->validate([
-            'name' => 'required|string|max:255',
-            'is_active' => 'required|boolean',
-            'trigger' => 'required|array',
-            'actions' => 'required|array',
-        ]);
-
-        $workflow = Workflow::create([
-            ...$validated,
-            'user_id' => Auth::id(),
-        ]);
-
-        return response()->json([
-            'message' => 'Workflow created successfully',
-            'workflow' => $workflow
-        ]);
-    }
-
-    public function update(Workflow $workflow)
-    {
-        if ($workflow->user_id !== Auth::id()) {
-            abort(403);
-        }
-
-        $validated = request()->validate([
-            'name' => 'required|string|max:255',
-            'is_active' => 'required|boolean',
-            'trigger' => 'required|array',
-            'actions' => 'required|array',
-        ]);
-
-        $workflow->update($validated);
-
-        return response()->json([
-            'message' => 'Workflow updated successfully',
-            'workflow' => $workflow
-        ]);
-    }
-
-    public function destroy(Workflow $workflow)
-    {
-        if ($workflow->user_id !== Auth::id()) {
-            abort(403);
-        }
-        
-        $workflow->delete();
-        return response()->json([
-            'message' => 'Workflow deleted successfully'
-        ]);
-    }
-
-    public function pipelines()
-    {
-        $user = Auth::user();
-        $integration = Integration::where('user_id', $user->id)
-            ->where('type_id','1')
-            ->first();
-        $integrationMeta = json_decode($integration->meta,true) ; 
-        $pages = [];
-        foreach ($integrationMeta['pages'] as $page) {
-            $pages[] = [
-                'id' => $page['id'],
-                'name' => $page['name'],
-            ];
-        }
-        return response()->json($pages);
-    }
-
-    public function whatsappTemplates()
-    {
-        $user = Auth::user();
-        $integration = Integration::where('user_id', $user->id)
-            ->where('type_id','1')
-            ->first();
-        $integrationMeta = json_decode($integration->meta,true) ; 
-        $pages = [];
-        foreach ($integrationMeta['pages'] as $page) {
-            $pages[] = [
-                'id' => $page['id'],
-                'name' => $page['name'],
-            ];
-        }
-        return response()->json($pages);
     }
 }
