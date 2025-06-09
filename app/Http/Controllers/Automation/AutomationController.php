@@ -27,7 +27,6 @@ class AutomationController extends Controller
     public function index()
     {
         $workflows = Workflow::with(['folder', 'steps'])
-            ->byUser(Auth::id())
             ->latest()
             ->paginate(15);
 
@@ -40,8 +39,8 @@ class AutomationController extends Controller
             ->get();
 
         $stats = [
-            'total_workflows' => Workflow::byUser(Auth::id())->count(),
-            'active_workflows' => Workflow::byUser(Auth::id())->active()->count(),
+            'total_workflows' => Workflow::count(),
+            'active_workflows' => Workflow::active()->count(),
             'total_executions_today' => WorkflowExecution::whereHas('workflow', function ($query) {
                 $query->where('user_id', Auth::id());
             })->whereDate('created_at', today())->count(),
@@ -61,8 +60,8 @@ class AutomationController extends Controller
         
         // Get workflow analytics
         $workflowStats = [
-            'total' => Workflow::byUser($userId)->count(),
-            'active' => Workflow::byUser($userId)->active()->count(),
+            'total' => Workflow::count(),
+            'active' => Workflow::active()->count(),
             'executions_today' => WorkflowExecution::whereHas('workflow', function ($query) use ($userId) {
                 $query->where('user_id', $userId);
             })->whereDate('created_at', today())->count(),
@@ -79,8 +78,7 @@ class AutomationController extends Controller
             ->get();
 
         // Get top performing workflows
-        $topWorkflows = Workflow::byUser($userId)
-            ->active()
+        $topWorkflows = Workflow::active()
             ->orderBy('success_rate', 'desc')
             ->limit(5)
             ->get(['id', 'name', 'success_rate', 'total_runs']);
@@ -209,8 +207,8 @@ class AutomationController extends Controller
 
     private function calculateOverallSuccessRate(): float
     {
-        $totalRuns = Workflow::byUser(Auth::id())->sum('total_runs');
-        $successRuns = Workflow::byUser(Auth::id())->sum('success_runs');
+        $totalRuns = Workflow::sum('total_runs');
+        $successRuns = Workflow::sum('success_runs');
         
         return $totalRuns > 0 ? round(($successRuns / $totalRuns) * 100, 2) : 0;
     }

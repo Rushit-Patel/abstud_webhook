@@ -1,13 +1,11 @@
 <?php
+// app/Models/Workflow.php
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Casts\Attribute;
 
 class Workflow extends Model
 {
@@ -15,6 +13,7 @@ class Workflow extends Model
 
     protected $fillable = [
         'user_id',
+        'trigger_id',
         'name',
         'description',
         'trigger_type',
@@ -23,13 +22,12 @@ class Workflow extends Model
         'version',
         'is_template',
         'metadata',
-        'folder_id',
         'last_run_at',
         'total_runs',
         'success_runs',
         'failed_runs',
         'success_rate',
-        'average_execution_time_ms'
+        'average_execution_time_ms',
     ];
 
     protected $casts = [
@@ -37,79 +35,32 @@ class Workflow extends Model
         'metadata' => 'array',
         'is_template' => 'boolean',
         'last_run_at' => 'datetime',
-        'success_rate' => 'decimal:2'
+        'success_rate' => 'decimal:2',
     ];
 
-    protected $attributes = [
-        'status' => 'draft',
-        'version' => 1,
-        'total_runs' => 0,
-        'success_runs' => 0,
-        'failed_runs' => 0,
-        'success_rate' => 0.00,
-        'average_execution_time_ms' => 0
+    protected $dates = [
+        'last_run_at',
+        'deleted_at',
     ];
 
-    // Relationships
-    public function user(): BelongsTo
+    public function user()
     {
         return $this->belongsTo(User::class);
     }
 
-    public function folder(): BelongsTo
+    public function trigger()
     {
-        return $this->belongsTo(WorkflowFolder::class, 'folder_id');
+        return $this->belongsTo(Trigger::class);
     }
 
-    public function steps(): HasMany
-    {
-        return $this->hasMany(WorkflowStep::class)->orderBy('position');
-    }
-
-    public function executions(): HasMany
-    {
-        return $this->hasMany(WorkflowExecution::class);
-    }
-
-    public function metrics(): HasMany
-    {
-        return $this->hasMany(WorkflowMetric::class);
-    }
-
-    public function auditLogs(): HasMany
-    {
-        return $this->hasMany(WorkflowAuditLog::class);
-    }
-
-    public function errors(): HasMany
-    {
-        return $this->hasMany(WorkflowError::class);
-    }
-
-    public function variables(): HasMany
-    {
-        return $this->hasMany(WorkflowVariable::class);
-    }
-
-    public function leadTriggers(): HasMany
-    {
-        return $this->hasMany(LeadWorkflowTrigger::class);
-    }
-
-    public function scheduledRuns(): HasMany
-    {
-        return $this->hasMany(ScheduledWorkflowRun::class);
-    }
-
-    // Scopes
     public function scopeActive($query)
     {
         return $query->where('status', 'active');
     }
 
-    public function scopeByUser($query, $userId)
+    public function scopeByTriggerType($query, $type)
     {
-        return $query->where('user_id', $userId);
+        return $query->where('trigger_type', $type);
     }
 
     public function scopeTemplates($query)
@@ -117,50 +68,81 @@ class Workflow extends Model
         return $query->where('is_template', true);
     }
 
-    // Accessors & Mutators
-    public function successRate(): Attribute
+    public function scopeForUser($query, $userId)
     {
-        return Attribute::make(
-            get: function () {
-                if ($this->total_runs === 0) return 0;
-                return round(($this->success_runs / $this->total_runs) * 100, 2);
-            }
-        );
+        return $query->where('user_id', $userId);
     }
 
-    // Helper Methods
-    public function updateStats(): void
+    // Check if workflow has a trigger (either attached or inline)
+    public function hasTrigger()
     {
-        $this->update([
-            'success_rate' => $this->successRate,
-            'last_run_at' => $this->executions()->latest()->first()?->started_at
-        ]);
+        return $this->trigger_id || $this->trigger_type;
     }
 
-    public function isExecutable(): bool
+    // Get effective trigger (either from relationship or inline)
+    public function getEffectiveTrigger()
     {
-        return $this->status === 'active' && $this->steps()->count() > 0;
-    }
-
-    public function duplicate(string $newName = null): self
-    {
-        $newWorkflow = $this->replicate();
-        $newWorkflow->name = $newName ?? $this->name . ' (Copy)';
-        $newWorkflow->status = 'draft';
-        $newWorkflow->is_template = false;
-        $newWorkflow->total_runs = 0;
-        $newWorkflow->success_runs = 0;
-        $newWorkflow->failed_runs = 0;
-        $newWorkflow->last_run_at = null;
-        $newWorkflow->save();
-
-        // Duplicate steps
-        foreach ($this->steps as $step) {
-            $newStep = $step->replicate();
-            $newStep->workflow_id = $newWorkflow->id;
-            $newStep->save();
+        if ($this->trigger) {
+            return $this->trigger;
         }
 
-        return $newWorkflow;
+        if ($this->trigger_type) {
+            return (object) [
+                'id' => null,
+                'type' => $this->trigger_type,
+                'config' => $this->trigger_config,
+                'name' => ucwords(str_replace('_', ' ', $this->trigger_type)),
+                'description' => 'Inline trigger',
+            ];
+        }
+
+        return null;
+    }
+
+    // Get legacy actions from metadata
+    public function getLegacyActions()
+    {
+        return $this->metadata['legacy_actions'] ?? [];
+    }
+
+    // Set legacy actions in metadata
+    public function setLegacyActions($actions)
+    {
+        $metadata = $this->metadata ?? [];
+        $metadata['legacy_actions'] = $actions;
+        $this->metadata = $metadata;
+        $this->save();
+    }
+
+    // Get legacy trigger from metadata
+    public function getLegacyTrigger()
+    {
+        return $this->metadata['legacy_trigger'] ?? null;
+    }
+
+    // Set legacy trigger in metadata
+    public function setLegacyTrigger($trigger)
+    {
+        $metadata = $this->metadata ?? [];
+        $metadata['legacy_trigger'] = $trigger;
+        $this->metadata = $metadata;
+        $this->save();
+    }
+
+    // Calculate success rate
+    public function updateSuccessRate()
+    {
+        if ($this->total_runs > 0) {
+            $this->success_rate = ($this->success_runs / $this->total_runs) * 100;
+        } else {
+            $this->success_rate = 0;
+        }
+        $this->save();
+    }
+
+    // Get formatted status
+    public function getFormattedStatusAttribute()
+    {
+        return ucfirst($this->status);
     }
 }

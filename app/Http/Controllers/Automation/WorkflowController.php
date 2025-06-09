@@ -1,288 +1,408 @@
 <?php
+// app/Http/Controllers/Automation/WorkflowController.php
 
 namespace App\Http\Controllers\Automation;
 
 use App\Http\Controllers\Controller;
 use App\Models\Workflow;
-use App\Models\WorkflowFolder;
-use App\Services\WorkflowExecutionService;
-use App\Services\DataTableService;
+use App\Models\Trigger;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
-use Inertia\Inertia;
 
 class WorkflowController extends Controller
 {
-    protected WorkflowExecutionService $executionService;
-    protected DataTableService $dataTableService;
-
-    public function __construct(
-        WorkflowExecutionService $executionService,
-        DataTableService $dataTableService
-    ) {
-        $this->executionService = $executionService;
-        $this->dataTableService = $dataTableService;
-    }
-
+    /**
+     * Display a listing of workflows.
+     */
     public function index(Request $request)
     {
-        $query = Workflow::with(['folder', 'steps'])
-            ->byUser(Auth::id())
-            ->latest();
+        $query = Workflow::where('user_id', Auth::id());
 
-        // Apply filters
-        if ($request->filled('search')) {
-            $query->where('name', 'like', '%' . $request->search . '%');
-        }
-
-        if ($request->filled('status')) {
+        // Filter by status
+        if ($request->has('status')) {
             $query->where('status', $request->status);
         }
 
-        if ($request->filled('folder_id')) {
-            $query->where('folder_id', $request->folder_id);
+        // Search functionality
+        if ($request->has('search')) {
+            $search = $request->search;
+            $query->where(function($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                  ->orWhere('description', 'like', "%{$search}%");
+            });
         }
 
-        $workflows = $query->paginate(15);
+        // Filter by trigger type
+        if ($request->has('trigger_type')) {
+            $query->where('trigger_type', $request->trigger_type);
+        }
 
-        $folders = WorkflowFolder::where('user_id', Auth::id())
-            ->withCount('workflows')
-            ->orderBy('sort_order')
-            ->get();
+        // Filter templates
+        if ($request->has('templates')) {
+            $query->where('is_template', $request->boolean('templates'));
+        }
 
-        $stats = [
-            'total' => Workflow::byUser(Auth::id())->count(),
-            'active' => Workflow::byUser(Auth::id())->active()->count(),
-            'templates' => Workflow::byUser(Auth::id())->templates()->count(),
-            'total_executions_today' => DB::table('workflow_executions')
-                ->join('workflows', 'workflow_executions.workflow_id', '=', 'workflows.id')
-                ->where('workflows.user_id', Auth::id())
-                ->whereDate('workflow_executions.created_at', today())
-                ->count()
-        ];
+        $workflows = $query->with(['trigger', 'user'])
+                          ->orderBy('updated_at', 'desc')
+                          ->get();
 
-        return Inertia::render('Automation/Index', [
-            'workflows' => $workflows,
-            'folders' => $folders,
-            'stats' => $stats,
-            'filters' => $request->only(['search', 'status', 'folder_id'])
-        ]);
+        // Transform for legacy compatibility
+        $workflows = $workflows->map(function($workflow) {
+            $workflowData = $workflow->toArray();
+            
+            // Add legacy trigger format
+            $effectiveTrigger = $workflow->getEffectiveTrigger();
+            if ($effectiveTrigger) {
+                $workflowData['trigger'] = [
+                    'type' => $effectiveTrigger->type,
+                    'config' => $effectiveTrigger->config ?? null,
+                ];
+                $workflowData['is_active'] = $workflow->status === 'active';
+            }
+
+            // Add legacy actions
+            $workflowData['actions'] = $workflow->getLegacyActions();
+
+            return $workflowData;
+        });
+
+        return response()->json($workflows);
     }
 
-    public function create()
-    {
-        $folders = WorkflowFolder::where('user_id', Auth::id())
-            ->orderBy('sort_order')
-            ->get();
-
-        return Inertia::render('Automation/WorkflowBuilder', [
-            'workflow' => null,
-            'folders' => $folders
-        ]);
-    }
-
+    /**
+     * Store a newly created workflow.
+     */
     public function store(Request $request)
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'trigger' => 'required|array',
-            'trigger.type' => 'required|string',
-            'actions' => 'required|array|min:1',
-            'is_active' => 'boolean',
-            'folder_id' => 'nullable|exists:workflow_folders,id',
-            'tags' => 'nullable|array'
+            'description' => 'nullable|string|max:1000',
+            'trigger_id' => 'nullable|exists:triggers,id',
+            'trigger_type' => ['nullable', Rule::in(['webhook', 'schedule', 'manual', 'event', 'lead_created', 'form_submitted'])],
+            'trigger_config' => 'nullable|array',
+            'status' => ['nullable', Rule::in(['active', 'inactive', 'draft'])],
+            'is_template' => 'nullable|boolean',
+            'metadata' => 'nullable|array',
+            
+            // Legacy fields for backward compatibility
+            'trigger' => 'nullable|array',
+            'actions' => 'nullable|array',
+            'is_active' => 'nullable|boolean',
         ]);
 
-        DB::transaction(function () use ($validated) {
-            $workflow = Workflow::create([
-                'user_id' => Auth::id(),
-                'name' => $validated['name'],
-                'description' => $validated['description'] ?? null,
-                'trigger_type' => $validated['trigger']['type'],
-                'trigger_config' => $validated['trigger'],
-                'status' => $validated['is_active'] ? 'active' : 'draft',
-                'folder_id' => $validated['folder_id'] ?? null,
-                'metadata' => [
-                    'tags' => $validated['tags'] ?? []
-                ]
-            ]);
+        // Validate that trigger_id belongs to current user if provided
+        if (isset($validated['trigger_id'])) {
+            $trigger = Trigger::where('id', $validated['trigger_id'])
+                             ->where('user_id', Auth::id())
+                             ->first();
+            if (!$trigger) {
+                return response()->json(['message' => 'Invalid trigger selected'], 422);
+            }
+        }
 
-            // Create workflow steps
-            foreach ($validated['actions'] as $index => $action) {
-                $workflow->steps()->create([
-                    'step_type' => $action['type'],
-                    'name' => $action['name'] ?? $action['type'],
-                    'config' => $action,
-                    'position' => $index + 1,
-                    'enabled' => $action['enabled'] ?? true
-                ]);
+        DB::beginTransaction();
+        try {
+            // Handle legacy trigger format
+            if (isset($validated['trigger']) && !isset($validated['trigger_type']) && !isset($validated['trigger_id'])) {
+                $validated['trigger_type'] = $validated['trigger']['type'] ?? null;
+                $validated['trigger_config'] = $validated['trigger'];
             }
 
-            return $workflow;
-        });
+            // Handle legacy is_active
+            if (isset($validated['is_active'])) {
+                $validated['status'] = $validated['is_active'] ? 'active' : 'inactive';
+            }
 
-        return redirect()->route('automation.workflows.index')
-            ->with('success', 'Workflow created successfully');
+            $workflow = Workflow::create([
+                'user_id' => Auth::id(),
+                'trigger_id' => $validated['trigger_id'] ?? null,
+                'name' => $validated['name'],
+                'description' => $validated['description'] ?? null,
+                'trigger_type' => $validated['trigger_type'] ?? null,
+                'trigger_config' => $validated['trigger_config'] ?? null,
+                'status' => $validated['status'] ?? 'draft',
+                'version' => 1,
+                'is_template' => $validated['is_template'] ?? false,
+                'metadata' => $validated['metadata'] ?? [],
+            ]);
+
+            // Store legacy data
+            if (isset($validated['trigger'])) {
+                $workflow->setLegacyTrigger($validated['trigger']);
+            }
+            if (isset($validated['actions'])) {
+                $workflow->setLegacyActions($validated['actions']);
+            }
+
+            DB::commit();
+
+            // Load relationships and return
+            $workflow->load(['trigger', 'user']);
+            
+            // Transform for legacy compatibility
+            $workflowData = $workflow->toArray();
+            $effectiveTrigger = $workflow->getEffectiveTrigger();
+            if ($effectiveTrigger) {
+                $workflowData['trigger'] = [
+                    'type' => $effectiveTrigger->type,
+                    'config' => $effectiveTrigger->config ?? null,
+                ];
+                $workflowData['is_active'] = $workflow->status === 'active';
+            }
+            $workflowData['actions'] = $workflow->getLegacyActions();
+
+            return response()->json($workflowData, 201);
+
+        } catch (\Exception $e) {
+            DB::rollback();
+            return response()->json(['message' => 'Failed to create workflow: ' . $e->getMessage()], 500);
+        }
     }
 
+    /**
+     * Display the specified workflow.
+     */
     public function show(Workflow $workflow)
     {
         $this->authorize('view', $workflow);
+        
+        // Load relationships
+        $workflow->load(['trigger', 'user']);
+        
+        // Transform for legacy compatibility
+        $workflowData = $workflow->toArray();
+        
+        // Add effective trigger
+        $effectiveTrigger = $workflow->getEffectiveTrigger();
+        if ($effectiveTrigger) {
+            $workflowData['trigger'] = [
+                'type' => $effectiveTrigger->type,
+                'config' => $effectiveTrigger->config ?? null,
+            ];
+            $workflowData['is_active'] = $workflow->status === 'active';
+        }
 
-        $workflow->load(['steps', 'executions' => function ($query) {
-            $query->latest()->limit(10);
-        }]);
+        // Add legacy actions
+        $workflowData['actions'] = $workflow->getLegacyActions();
 
-        return Inertia::render('Automation/WorkflowDetail', [
-            'workflow' => $workflow
-        ]);
+        return response()->json($workflowData);
     }
 
-    public function edit(Workflow $workflow)
-    {
-        $this->authorize('update', $workflow);
-
-        $folders = WorkflowFolder::where('user_id', Auth::id())
-            ->orderBy('sort_order')
-            ->get();
-
-        $workflow->load('steps');
-
-        return Inertia::render('Automation/WorkflowBuilder', [
-            'workflow' => $workflow,
-            'folders' => $folders
-        ]);
-    }
-
+    /**
+     * Update the specified workflow.
+     */
     public function update(Request $request, Workflow $workflow)
     {
         $this->authorize('update', $workflow);
 
         $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'trigger' => 'required|array',
-            'trigger.type' => 'required|string',
-            'actions' => 'required|array|min:1',
-            'is_active' => 'boolean',
-            'folder_id' => 'nullable|exists:workflow_folders,id',
-            'tags' => 'nullable|array'
+            'name' => 'sometimes|string|max:255',
+            'description' => 'nullable|string|max:1000',
+            'trigger_id' => 'nullable|exists:triggers,id',
+            'trigger_type' => ['nullable', Rule::in(['webhook', 'schedule', 'manual', 'event', 'lead_created', 'form_submitted'])],
+            'trigger_config' => 'nullable|array',
+            'status' => ['sometimes', Rule::in(['active', 'inactive', 'draft'])],
+            'is_template' => 'sometimes|boolean',
+            'metadata' => 'nullable|array',
+            
+            // Legacy fields
+            'trigger' => 'nullable|array',
+            'actions' => 'nullable|array',
+            'is_active' => 'nullable|boolean',
         ]);
 
-        DB::transaction(function () use ($workflow, $validated) {
-            $workflow->update([
-                'name' => $validated['name'],
-                'description' => $validated['description'] ?? null,
-                'trigger_type' => $validated['trigger']['type'],
-                'trigger_config' => $validated['trigger'],
-                'status' => $validated['is_active'] ? 'active' : 'draft',
-                'folder_id' => $validated['folder_id'] ?? null,
-                'metadata' => [
-                    'tags' => $validated['tags'] ?? []
-                ],
-                'version' => $workflow->version + 1
-            ]);
-
-            // Remove existing steps and create new ones
-            $workflow->steps()->delete();
-
-            foreach ($validated['actions'] as $index => $action) {
-                $workflow->steps()->create([
-                    'step_type' => $action['type'],
-                    'name' => $action['name'] ?? $action['type'],
-                    'config' => $action,
-                    'position' => $index + 1,
-                    'enabled' => $action['enabled'] ?? true
-                ]);
+        // Validate trigger ownership if provided
+        if (isset($validated['trigger_id']) && $validated['trigger_id']) {
+            $trigger = Trigger::where('id', $validated['trigger_id'])
+                             ->where('user_id', Auth::id())
+                             ->first();
+            if (!$trigger) {
+                return response()->json(['message' => 'Invalid trigger selected'], 422);
             }
-        });
+        }
 
-        return redirect()->route('automation.workflows.index')
-            ->with('success', 'Workflow updated successfully');
+        DB::beginTransaction();
+        try {
+            // Handle legacy format conversion
+            if (isset($validated['trigger'])) {
+                $validated['trigger_type'] = $validated['trigger']['type'] ?? $workflow->trigger_type;
+                $validated['trigger_config'] = $validated['trigger'];
+                // Clear trigger_id when using inline trigger
+                $validated['trigger_id'] = null;
+            }
+
+            // Handle legacy is_active
+            if (isset($validated['is_active'])) {
+                $validated['status'] = $validated['is_active'] ? 'active' : 'inactive';
+            }
+
+            // Update workflow
+            $workflow->update($validated);
+
+            // Update legacy data
+            if (isset($validated['trigger'])) {
+                $workflow->setLegacyTrigger($validated['trigger']);
+            }
+            if (isset($validated['actions'])) {
+                $workflow->setLegacyActions($validated['actions']);
+            }
+
+            DB::commit();
+
+            // Load relationships and return
+            $workflow->load(['trigger', 'user']);
+            
+            // Transform for legacy compatibility
+            $workflowData = $workflow->fresh()->toArray();
+            $effectiveTrigger = $workflow->getEffectiveTrigger();
+            if ($effectiveTrigger) {
+                $workflowData['trigger'] = [
+                    'type' => $effectiveTrigger->type,
+                    'config' => $effectiveTrigger->config ?? null,
+                ];
+                $workflowData['is_active'] = $workflow->status === 'active';
+            }
+            $workflowData['actions'] = $workflow->getLegacyActions();
+
+            return response()->json($workflowData);
+
+        } catch (\Exception $e) {
+            DB::rollback();
+            return response()->json(['message' => 'Failed to update workflow: ' . $e->getMessage()], 500);
+        }
     }
 
+    /**
+     * Remove the specified workflow.
+     */
     public function destroy(Workflow $workflow)
     {
         $this->authorize('delete', $workflow);
-
+        
         $workflow->delete();
 
-        return redirect()->route('automation.workflows.index')
-            ->with('success', 'Workflow deleted successfully');
+        return response()->json(['message' => 'Workflow deleted successfully']);
     }
 
-    public function execute(Request $request, Workflow $workflow)
-    {
-        $this->authorize('execute', $workflow);
-
-        if (!$workflow->isExecutable()) {
-            return response()->json([
-                'error' => 'Workflow is not executable'
-            ], 422);
-        }
-
-        $execution = $this->executionService->execute(
-            $workflow,
-            $request->input('trigger_data', []),
-            Auth::user()
-        );
-
-        return response()->json([
-            'execution' => $execution,
-            'message' => 'Workflow execution started'
-        ]);
-    }
-
+    /**
+     * Duplicate a workflow.
+     */
     public function duplicate(Workflow $workflow)
     {
         $this->authorize('view', $workflow);
 
-        $newWorkflow = $workflow->duplicate();
+        DB::beginTransaction();
+        try {
+            $newWorkflow = $workflow->replicate();
+            $newWorkflow->name = $workflow->name . ' (Copy)';
+            $newWorkflow->status = 'draft';
+            $newWorkflow->user_id = Auth::id();
+            $newWorkflow->total_runs = 0;
+            $newWorkflow->success_runs = 0;
+            $newWorkflow->failed_runs = 0;
+            $newWorkflow->success_rate = 0;
+            $newWorkflow->average_execution_time_ms = 0;
+            $newWorkflow->last_run_at = null;
+            $newWorkflow->is_template = false;
+            $newWorkflow->save();
 
-        return redirect()->route('automation.workflows.edit', $newWorkflow)
-            ->with('success', 'Workflow duplicated successfully');
+            // Copy legacy data
+            $newWorkflow->setLegacyActions($workflow->getLegacyActions());
+            $newWorkflow->setLegacyTrigger($workflow->getLegacyTrigger());
+
+            DB::commit();
+
+            return response()->json($newWorkflow->load(['trigger', 'user']), 201);
+
+        } catch (\Exception $e) {
+            DB::rollback();
+            return response()->json(['message' => 'Failed to duplicate workflow: ' . $e->getMessage()], 500);
+        }
     }
 
-    public function toggle(Workflow $workflow)
+    /**
+     * Toggle workflow status.
+     */
+    public function toggleStatus(Workflow $workflow)
+    {
+        $this->authorize('update', $workflow);
+
+        $newStatus = $workflow->status === 'active' ? 'inactive' : 'active';
+        $workflow->update(['status' => $newStatus]);
+
+        return response()->json($workflow->fresh()->load(['trigger', 'user']));
+    }
+
+    /**
+     * Attach a trigger to workflow.
+     */
+    public function attachTrigger(Request $request, Workflow $workflow)
+    {
+        $this->authorize('update', $workflow);
+
+        $validated = $request->validate([
+            'trigger_id' => 'required|exists:triggers,id',
+        ]);
+
+        // Validate trigger ownership
+        $trigger = Trigger::where('id', $validated['trigger_id'])
+                         ->where('user_id', Auth::id())
+                         ->first();
+        
+        if (!$trigger) {
+            return response()->json(['message' => 'Invalid trigger selected'], 422);
+        }
+
+        $workflow->update([
+            'trigger_id' => $validated['trigger_id'],
+            'trigger_type' => null, // Clear inline trigger
+            'trigger_config' => null,
+        ]);
+
+        $workflow->load(['trigger', 'user']);
+
+        return response()->json($workflow);
+    }
+
+    /**
+     * Detach trigger from workflow.
+     */
+    public function detachTrigger(Workflow $workflow)
     {
         $this->authorize('update', $workflow);
 
         $workflow->update([
-            'status' => $workflow->status === 'active' ? 'inactive' : 'active'
+            'trigger_id' => null,
         ]);
 
-        return response()->json([
-            'status' => $workflow->status,
-            'message' => "Workflow {$workflow->status}"
-        ]);
+        return response()->json($workflow->fresh()->load(['trigger', 'user']));
     }
 
-    public function analytics(Workflow $workflow)
+    /**
+     * Get workflows without triggers.
+     */
+    public function withoutTriggers()
     {
-        $this->authorize('view', $workflow);
+        $workflows = Workflow::forUser(Auth::id())
+                           ->whereNull('trigger_id')
+                           ->whereNull('trigger_type')
+                           ->get();
 
-        $metrics = $workflow->metrics()
-            ->where('date', '>=', now()->subDays(30))
-            ->orderBy('date')
-            ->get();
+        return response()->json($workflows);
+    }
 
-        $recentExecutions = $workflow->executions()
-            ->latest()
-            ->limit(50)
-            ->get(['status', 'execution_time_ms', 'created_at']);
+    /**
+     * Get workflow templates.
+     */
+    public function templates()
+    {
+        $templates = Workflow::forUser(Auth::id())
+                           ->templates()
+                           ->with(['trigger'])
+                           ->get();
 
-        return response()->json([
-            'metrics' => $metrics,
-            'recent_executions' => $recentExecutions,
-            'summary' => [
-                'total_runs' => $workflow->total_runs,
-                'success_rate' => $workflow->success_rate,
-                'avg_execution_time' => $workflow->average_execution_time_ms,
-                'last_run' => $workflow->last_run_at
-            ]
-        ]);
+        return response()->json($templates);
     }
 }

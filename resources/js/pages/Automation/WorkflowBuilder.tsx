@@ -21,14 +21,15 @@ import {
     useNodesState,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { AlertTriangle, CheckCircle, Edit3, Eye, Loader2, Save } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Edit3, Eye, Loader2, Save, ArrowLeft } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ActionSelector from './ActionSelector';
 import TriggerSelector from './TriggerSelector';
+import { useParams, useNavigate } from 'react-router-dom';
 
 interface WorkflowBuilderProps {
     initialWorkflow?: Workflow;
-    onSave: (workflow: Workflow) => void;
+    onSave?: (workflow: Workflow) => Promise<Workflow>;
 }
 
 type CustomNodeData = {
@@ -283,16 +284,31 @@ const nodeTypes = {
     condition: ConditionNode,
 };
 
-const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSave }) => {
+const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSave: onSaveProp }) => {
+    const { workflowId } = useParams<{ workflowId?: string }>();
+    const navigate = useNavigate();
+    
     const [workflow, setWorkflow] = useState<Workflow>(
         initialWorkflow || {
-            name: '',
-            is_active: true,
+            name: 'Untitled Workflow',
+            description: '',
+            trigger_type: undefined,
+            status: 'draft',
+            version: 1,
+            is_template: false,
+            total_runs: 0,
+            success_runs: 0,
+            failed_runs: 0,
+            success_rate: 0,
+            average_execution_time_ms: 0,
+            // Legacy compatibility
             trigger: { type: '' },
             actions: [],
+            is_active: false,
         },
     );
 
+    const [loading, setLoading] = useState(false);
     const [nodes, setNodes, onNodesChange] = useNodesState<CustomNode>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<CustomEdge>([]);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -302,18 +318,57 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
     const [isPreviewMode, setIsPreviewMode] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
-    const hasTrigger = workflow.trigger.type !== '';
+    // Load workflow if editing existing one
+    useEffect(() => {
+        if (workflowId && workflowId !== 'new' && !initialWorkflow) {
+            setLoading(true);
+            fetch(`/automation/workflows/${workflowId}`, {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
+                },
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Failed to load workflow');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    setWorkflow(data);
+                })
+                .catch(error => {
+                    console.error('Failed to load workflow:', error);
+                    setError('Failed to load workflow');
+                })
+                .finally(() => setLoading(false));
+        }
+    }, [workflowId, initialWorkflow]);
+
+    const hasTrigger = workflow.trigger?.type !== '' || 
+                      workflow.trigger_type !== undefined || 
+                      workflow.trigger_id !== undefined;
 
     const buildFlow = useCallback(() => {
         const newNodes: CustomNode[] = [];
         const newEdges: CustomEdge[] = [];
+
+        // Determine trigger label
+        let triggerLabel = 'Add Trigger';
+        if (workflow.trigger?.type) {
+            triggerLabel = workflow.trigger.type.replace(/_/g, ' ').toUpperCase();
+        } else if (workflow.trigger_type) {
+            triggerLabel = workflow.trigger_type.replace(/_/g, ' ').toUpperCase();
+        } else if (workflow.trigger_id && workflow.trigger) {
+            triggerLabel = workflow.trigger.name || workflow.trigger.type?.replace(/_/g, ' ').toUpperCase();
+        }
 
         // Add trigger node
         newNodes.push({
             id: 'trigger',
             type: 'trigger',
             data: {
-                label: hasTrigger ? workflow.trigger.type.replace(/_/g, ' ').toUpperCase() : 'Add Trigger',
+                label: hasTrigger ? triggerLabel : 'Add Trigger',
                 description: hasTrigger ? 'Trigger configured' : 'Click to add trigger',
                 hasSelectedTrigger: hasTrigger,
             },
@@ -321,7 +376,7 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
             draggable: !isPreviewMode,
         });
 
-        if (hasTrigger) {
+        if (hasTrigger && workflow.actions && workflow.actions.length > 0) {
             // Add action nodes
             workflow.actions.forEach((action, index) => {
                 const nodeId = `action-${index}`;
@@ -356,46 +411,50 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
                     animated: true,
                 });
             });
+        }
 
-            // Add "+" node for adding new actions
-            const addActionNodeId = 'add-action';
-            newNodes.push({
-                id: addActionNodeId,
-                type: 'action',
-                data: {
-                    isAddButton: true,
-                    label: 'Add Action',
+        // Always add "+" node for adding new actions (regardless of trigger state)
+        const addActionNodeId = 'add-action';
+        const yPosition = workflow.actions?.length 
+            ? (workflow.actions.length + 1) * 180 + 50 
+            : 230; // Position below trigger if no actions
+
+        newNodes.push({
+            id: addActionNodeId,
+            type: 'action',
+            data: {
+                isAddButton: true,
+                label: 'Add Action',
+            },
+            position: { x: 250, y: yPosition },
+            draggable: !isPreviewMode,
+        });
+
+        // Connect to add action node
+        if (workflow.actions && workflow.actions.length > 0) {
+            newEdges.push({
+                id: `edge-action-${workflow.actions.length - 1}-${addActionNodeId}`,
+                source: `action-${workflow.actions.length - 1}`,
+                target: addActionNodeId,
+                type: 'smoothstep',
+                style: {
+                    stroke: '#d1d5db',
+                    strokeWidth: 2,
+                    strokeDasharray: '2,2',
                 },
-                position: { x: 250, y: (workflow.actions.length + 1) * 180 + 50 },
-                draggable: !isPreviewMode,
             });
-
-            // Connect last action to "+" node
-            if (workflow.actions.length > 0) {
-                newEdges.push({
-                    id: `edge-action-${workflow.actions.length - 1}-${addActionNodeId}`,
-                    source: `action-${workflow.actions.length - 1}`,
-                    target: addActionNodeId,
-                    type: 'smoothstep',
-                    style: {
-                        stroke: '#d1d5db',
-                        strokeWidth: 2,
-                        strokeDasharray: '2,2',
-                    },
-                });
-            } else {
-                newEdges.push({
-                    id: 'edge-trigger-add-action',
-                    source: 'trigger',
-                    target: addActionNodeId,
-                    type: 'smoothstep',
-                    style: {
-                        stroke: '#d1d5db',
-                        strokeWidth: 2,
-                        strokeDasharray: '2,2',
-                    },
-                });
-            }
+        } else if (hasTrigger) {
+            newEdges.push({
+                id: 'edge-trigger-add-action',
+                source: 'trigger',
+                target: addActionNodeId,
+                type: 'smoothstep',
+                style: {
+                    stroke: '#d1d5db',
+                    strokeWidth: 2,
+                    strokeDasharray: '2,2',
+                },
+            });
         }
 
         setNodes(newNodes);
@@ -412,6 +471,8 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
                 return action.webhookUrl ? 'configured' : 'incomplete';
             case 'condition':
                 return action.conditions && action.conditions.length > 0 ? 'configured' : 'incomplete';
+            case 'send_whatsapp':
+                return action.phone && action.message ? 'configured' : 'incomplete';
             default:
                 return 'configured';
         }
@@ -423,6 +484,8 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
             send_webhook: 'Send data to external service',
             condition: 'Branch workflow based on conditions',
             send_whatsapp: 'Send WhatsApp message',
+            delay: 'Wait for specified time',
+            log: 'Log custom message',
         };
         return descriptions[actionType] || 'Custom action';
     };
@@ -432,7 +495,7 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
             return 'No conditions set';
         }
         const condition = action.conditions[0];
-        return `${condition.type}: ${condition.value}`;
+        return `${condition.field} ${condition.operator} ${condition.value}`;
     };
 
     useEffect(() => {
@@ -470,7 +533,13 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
     );
 
     const handleTriggerSelect = useCallback((trigger: Trigger) => {
-        setWorkflow((prev) => ({ ...prev, trigger }));
+        setWorkflow((prev) => ({ 
+            ...prev, 
+            trigger,
+            trigger_type: trigger.type as any || 'webhook',
+            // Clear trigger_id if we're setting an inline trigger
+            trigger_id: undefined,
+        }));
         setIsSidebarOpen(false);
         setError(null);
     }, []);
@@ -480,13 +549,13 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
             if (selectedNodeId === 'add-action') {
                 setWorkflow((prev) => ({
                     ...prev,
-                    actions: [...prev.actions, action],
+                    actions: [...(prev.actions || []), action],
                 }));
             } else if (selectedNodeId?.startsWith('action-')) {
                 const actionIndex = parseInt(selectedNodeId.split('-')[1], 10);
                 setWorkflow((prev) => ({
                     ...prev,
-                    actions: prev.actions.map((a, i) => (i === actionIndex ? action : a)),
+                    actions: prev.actions?.map((a, i) => (i === actionIndex ? action : a)) || [],
                 }));
             }
             setIsSidebarOpen(false);
@@ -496,38 +565,132 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
     );
 
     const handleSave = useCallback(async () => {
-        if (!workflow.trigger.type) {
-            setError('Please configure a trigger first');
-            return;
-        }
-
+        // Allow saving workflows without triggers - this is now permitted
         setIsSaving(true);
         setError(null);
 
         try {
-            await onSave(workflow);
+            let savedWorkflow: Workflow;
+
+            if (onSaveProp) {
+                savedWorkflow = await onSaveProp(workflow);
+            } else {
+                // Default save implementation
+                const url = workflow.id 
+                    ? `/automation/workflows/${workflow.id}` 
+                    : '/automation/workflows';
+                    
+                const method = workflow.id ? 'PUT' : 'POST';
+
+                const response = await fetch(url, {
+                    method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
+                    },
+                    body: JSON.stringify(workflow),
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.message || 'Failed to save workflow');
+                }
+
+                savedWorkflow = await response.json();
+            }
+
+            setWorkflow(savedWorkflow);
+            
+            // Redirect to edit mode if creating new workflow
+            if (!workflow.id && savedWorkflow.id) {
+                navigate(`/automation/workflows/${savedWorkflow.id}/edit`, { replace: true });
+            }
+
         } catch (err: any) {
             setError(err.message || 'Failed to save workflow');
         } finally {
             setIsSaving(false);
         }
-    }, [workflow, onSave]);
+    }, [workflow, onSaveProp, navigate]);
 
     const workflowStats = useMemo(() => {
-        const total = workflow.actions.length;
-        const configured = workflow.actions.filter((action) => validateAction(action) === 'configured').length;
-        const incomplete = workflow.actions.filter((action) => validateAction(action) === 'incomplete').length;
+        const total = workflow.actions?.length || 0;
+        const configured = workflow.actions?.filter((action) => validateAction(action) === 'configured').length || 0;
+        const incomplete = workflow.actions?.filter((action) => validateAction(action) === 'incomplete').length || 0;
 
         return { total, configured, incomplete };
     }, [workflow.actions]);
+
+    // Get current workflow ID for passing to components
+    const currentWorkflowId = workflow.id || (workflowId !== 'new' ? parseInt(workflowId || '0') : undefined);
+
+    if (loading) {
+        return (
+            <div className="h-full bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center">
+                <div className="flex items-center gap-2 text-gray-600">
+                    <Loader2 className="h-6 w-6 animate-spin" />
+                    <span>Loading workflow...</span>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="h-full bg-gradient-to-br from-slate-50 to-blue-50">
             <div className="flex h-full">
                 {/* Main Flow Area */}
                 <div className="relative h-full flex-1">
+                    {/* Header with Back Button and Workflow Title */}
+                    <div className="absolute top-4 left-4 right-4 z-10 flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => navigate('/automation/workflows')}
+                                className="bg-white/90 shadow-lg backdrop-blur-sm"
+                            >
+                                <ArrowLeft className="mr-2 h-4 w-4" />
+                                Back
+                            </Button>
+                            
+                            <Card className="bg-white/90 px-4 py-2 shadow-lg backdrop-blur-sm">
+                                <div className="flex items-center gap-3">
+                                    <div>
+                                        <h2 className="font-semibold text-gray-900">{workflow.name}</h2>
+                                        <p className="text-sm text-gray-600">
+                                            {workflow.description || 'No description'}
+                                        </p>
+                                    </div>
+                                    <Badge 
+                                        variant={workflow.status === 'active' ? 'default' : workflow.status === 'inactive' ? 'secondary' : 'outline'}
+                                    >
+                                        {workflow.status}
+                                    </Badge>
+                                </div>
+                            </Card>
+                        </div>
+
+                        <Button
+                            onClick={handleSave}
+                            disabled={isSaving}
+                            className="bg-blue-600 text-white shadow-lg hover:bg-blue-700"
+                        >
+                            {isSaving ? (
+                                <>
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    Saving...
+                                </>
+                            ) : (
+                                <>
+                                    <Save className="mr-2 h-4 w-4" />
+                                    Save Workflow
+                                </>
+                            )}
+                        </Button>
+                    </div>
+
                     {/* Toolbar */}
-                    <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
+                    <div className="absolute top-20 left-4 z-10 flex items-center gap-2">
                         <Card className="bg-white/90 px-3 py-2 shadow-lg backdrop-blur-sm">
                             <div className="flex items-center gap-4 text-sm">
                                 <div className="flex items-center gap-2">
@@ -542,6 +705,12 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
                                     <div className="h-2 w-2 rounded-full bg-blue-500"></div>
                                     <span>{workflowStats.total} Total Actions</span>
                                 </div>
+                                {hasTrigger && (
+                                    <div className="flex items-center gap-2">
+                                        <div className="h-2 w-2 rounded-full bg-purple-500"></div>
+                                        <span>Trigger Ready</span>
+                                    </div>
+                                )}
                             </div>
                         </Card>
 
@@ -553,27 +722,6 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
                         >
                             {isPreviewMode ? <Edit3 className="mr-2 h-4 w-4" /> : <Eye className="mr-2 h-4 w-4" />}
                             {isPreviewMode ? 'Edit' : 'Preview'}
-                        </Button>
-                    </div>
-
-                    {/* Save Button */}
-                    <div className="absolute top-4 right-4 z-10">
-                        <Button
-                            onClick={handleSave}
-                            disabled={isSaving || !hasTrigger}
-                            className="bg-blue-600 text-white shadow-lg hover:bg-blue-700"
-                        >
-                            {isSaving ? (
-                                <>
-                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                    Saving...
-                                </>
-                            ) : (
-                                <>
-                                    <Save className="mr-2 h-4 w-4" />
-                                    Save Workflow
-                                </>
-                            )}
                         </Button>
                     </div>
 
@@ -597,21 +745,23 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
                     </ReactFlow>
                 </div>
 
-                {/* Sidebar - Updated width */}
+                {/* Sidebar */}
                 {isSidebarOpen && (
                     <div className="w-[32rem] max-w-[90vw] border-l border-gray-200 bg-white shadow-xl">
                         {selectedNodeType === 'trigger' && (
                             <TriggerSelector
-                                selectedTrigger={workflow.trigger}
+                                selectedTrigger={workflow.trigger || { type: workflow.trigger_type || '' }}
                                 onChange={handleTriggerSelect}
                                 onClose={() => setIsSidebarOpen(false)}
-                                workflowId = {workflowId}
+                                workflowId={currentWorkflowId}
                             />
                         )}
                         {selectedNodeType === 'action' && (
                             <ActionSelector
                                 action={
-                                    selectedNodeId?.startsWith('action-') ? workflow.actions[parseInt(selectedNodeId.split('-')[1], 10)] : undefined
+                                    selectedNodeId?.startsWith('action-') 
+                                        ? workflow.actions?.[parseInt(selectedNodeId.split('-')[1], 10)] 
+                                        : undefined
                                 }
                                 onChange={handleActionSelect}
                                 onClose={() => setIsSidebarOpen(false)}
@@ -623,9 +773,22 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
 
             {/* Error Alert */}
             {error && (
-                <Alert variant="destructive" className="fixed right-4 bottom-4 w-96 shadow-lg">
+                <Alert variant="destructive" className="fixed right-4 bottom-4 w-96 shadow-lg z-50">
+                    <AlertTriangle className="h-4 w-4" />
                     <AlertDescription>{error}</AlertDescription>
                 </Alert>
+            )}
+
+            {/* Success Message */}
+            {!isSaving && !error && workflow.id && (
+                <div className="fixed right-4 bottom-4 z-50">
+                    <Card className="bg-green-50 border-green-200 shadow-lg">
+                        <div className="p-3 flex items-center gap-2 text-green-800">
+                            <CheckCircle className="h-4 w-4" />
+                            <span className="text-sm">Workflow saved successfully</span>
+                        </div>
+                    </Card>
+                </div>
             )}
 
             <style>{`
@@ -634,6 +797,10 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
         }
         .workflow-builder .react-flow__edge {
           cursor: default;
+        }
+        .workflow-builder .react-flow__controls {
+          bottom: 20px;
+          left: 20px;
         }
       `}</style>
         </div>

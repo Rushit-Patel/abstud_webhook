@@ -50,10 +50,18 @@ export interface Workflow {
   name: string;
   is_active: boolean;
   trigger: Trigger;
+  trigger_type: string;
   actions: Action[];
   description?: string;
   total_runs: number;
   tags: string[];
+  status: string;
+  version: number;
+  success_runs: number;
+  failed_runs: number;
+  is_template: boolean;
+  success_rate: number;
+  average_execution_time_ms: number;
 }
 
 export interface BranchResult {

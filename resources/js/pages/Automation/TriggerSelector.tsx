@@ -46,7 +46,7 @@ interface TriggerSelectorProps {
     selectedTrigger?: Trigger;
     onClose: () => void;
     onChange: (trigger: Trigger) => void;
-    workflowId?: string;
+    workflowId: string;
 }
 
 interface FacebookPage {
