@@ -8,7 +8,8 @@ interface UseWorkflowStateProps {
 }
 
 export const useWorkflowState = ({ initialWorkflows, initialWorkflowId }: UseWorkflowStateProps) => {
-    const [workflows, setWorkflows] = useState<Workflow[]>(initialWorkflows);
+    // Ensure initialWorkflows is always an array
+    const [workflows, setWorkflows] = useState<Workflow[]>(Array.isArray(initialWorkflows) ? initialWorkflows : []);
     const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [workflowToDelete, setWorkflowToDelete] = useState<number | null>(null);
@@ -38,6 +39,7 @@ export const useWorkflowState = ({ initialWorkflows, initialWorkflowId }: UseWor
     } else {
         filteredWorkflows = [] as Workflow[];
     }
+    
     const openDeleteDialog = useCallback((id: number) => {
         setWorkflowToDelete(id);
         setIsDeleteDialogOpen(true);
@@ -53,14 +55,26 @@ export const useWorkflowState = ({ initialWorkflows, initialWorkflowId }: UseWor
     }, []);
 
     const updateWorkflow = useCallback((updatedWorkflow: Workflow) => {
-        setWorkflows(prev => 
-            prev.map(w => w.id === updatedWorkflow.id ? updatedWorkflow : w)
-        );
+        setWorkflows(prev => {
+            // Ensure prev is an array before calling map
+            if (!Array.isArray(prev)) {
+                console.warn('Workflows state is not an array, initializing as empty array');
+                return [updatedWorkflow];
+            }
+            return prev.map(w => w.id === updatedWorkflow.id ? updatedWorkflow : w);
+        });
         setSelectedWorkflow(updatedWorkflow);
     }, []);
 
     const removeWorkflow = useCallback((id: number) => {
-        setWorkflows(prev => prev.filter(w => w.id !== id));
+        setWorkflows(prev => {
+            // Ensure prev is an array before calling filter
+            if (!Array.isArray(prev)) {
+                console.warn('Workflows state is not an array, initializing as empty array');
+                return [];
+            }
+            return prev.filter(w => w.id !== id);
+        });
         if (selectedWorkflow?.id === id) {
             setSelectedWorkflow(null);
         }
