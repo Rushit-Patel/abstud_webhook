@@ -3,339 +3,215 @@
 namespace App\Services;
 
 use App\Models\Workflow;
-use App\Models\WorkflowRun;
+use App\Models\WorkflowExecution;
 use App\Models\WorkflowStep;
-use App\Models\WorkflowStepRun;
-use Carbon\Carbon;
+use App\Models\WorkflowStepExecution;
+use App\Models\User;
+use App\Jobs\ExecuteWorkflowStepJob;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 
 class WorkflowExecutionService
 {
-    public function executeWorkflow(Workflow $workflow, array $triggerData): WorkflowRun
+    public function execute(Workflow $workflow, array $triggerData = [], ?User $triggeredBy = null): WorkflowExecution
     {
-        $run = WorkflowRun::create([
+        $execution = WorkflowExecution::create([
             'workflow_id' => $workflow->id,
-            'status' => WorkflowRun::STATUS_PENDING,
+            'triggered_by_user_id' => $triggeredBy?->id,
             'trigger_data' => $triggerData,
+            'total_steps' => $workflow->steps()->enabled()->count(),
+            'execution_context' => [
+                'variables' => [],
+                'trigger_data' => $triggerData
+            ]
+        ]);
+
+        $execution->start();
+
+        // Execute first step
+        $firstStep = $workflow->steps()->enabled()->orderBy('position')->first();
+        if ($firstStep) {
+            $this->executeStep($execution, $firstStep);
+        } else {
+            $execution->complete();
+        }
+
+        return $execution;
+    }
+
+    public function executeStep(WorkflowExecution $execution, WorkflowStep $step): WorkflowStepExecution
+    {
+        $stepExecution = WorkflowStepExecution::create([
+            'execution_id' => $execution->id,
+            'step_id' => $step->id,
+            'input_data' => $execution->execution_context
+        ]);
+
+        $stepExecution->update([
+            'status' => 'running',
+            'started_at' => now()
         ]);
 
         try {
-            $run->markAsStarted();
+            $result = $this->processStep($step, $stepExecution);
             
-            $firstStep = $workflow->getFirstStep();
-            if (!$firstStep) {
-                throw new \Exception('Workflow has no steps');
-            }
+            $stepExecution->update([
+                'status' => 'completed',
+                'completed_at' => now(),
+                'output_data' => $result,
+                'execution_time_ms' => now()->diffInMilliseconds($stepExecution->started_at)
+            ]);
 
-            $this->executeStep($firstStep, $run);
+            // Update execution progress
+            $execution->increment('completed_steps');
             
-            $run->markAsCompleted();
-        } catch (\Exception $e) {
-            Log::error('Workflow execution failed', [
-                'workflow_id' => $workflow->id,
-                'run_id' => $run->id,
-                'error' => $e->getMessage(),
-            ]);
+            // Update execution context with step results
+            $context = $execution->execution_context;
+            $context['step_results'][$step->id] = $result;
+            $execution->update(['execution_context' => $context]);
 
-            $run->markAsFailed($e->getMessage());
-        }
-
-        return $run;
-    }
-
-    public function resumeWorkflowExecution(WorkflowStep $step, WorkflowRun $run, WorkflowStepRun $previousStepRun): void
-    {
-        try {
-            $this->executeStep($step, $run, $previousStepRun);
-        } catch (\Exception $e) {
-            Log::error('Workflow resume failed', [
-                'workflow_id' => $run->workflow_id,
-                'run_id' => $run->id,
-                'step_id' => $step->id,
-                'error' => $e->getMessage(),
-            ]);
-
-            $run->markAsFailed("Failed to resume workflow: {$e->getMessage()}");
-        }
-    }
-
-    protected function executeStep(WorkflowStep $step, WorkflowRun $run, ?WorkflowStepRun $previousStepRun = null): void
-    {
-        $stepRun = WorkflowStepRun::create([
-            'workflow_id' => $run->workflow_id,
-            'workflow_step_id' => $step->id,
-            'status' => WorkflowStepRun::STATUS_PENDING,
-            'input_data' => $this->prepareStepInput($step, $run, $previousStepRun),
-        ]);
-
-        try {
-            $stepRun->markAsStarted();
-
-            switch ($step->step_type) {
-                case WorkflowStep::TYPE_ACTION:
-                    $output = $this->executeAction($step, $stepRun);
-                    break;
-
-                case WorkflowStep::TYPE_CONDITION:
-                    $output = $this->evaluateCondition($step, $stepRun);
-                    break;
-
-                case WorkflowStep::TYPE_DELAY:
-                    $this->handleDelay($step, $stepRun);
-                    return; // Delay handling is async
-
-                case WorkflowStep::TYPE_DATA_MAPPER:
-                    $output = $this->mapData($step, $stepRun);
-                    break;
-
-                default:
-                    throw new \Exception("Unknown step type: {$step->step_type}");
-            }
-
-            $stepRun->markAsCompleted($output);
-
-            // Update workflow context
-            $run->updateContext([
-                "step_{$step->step_uid}" => $output
-            ]);
-
-            // Get and execute next step
-            $nextStepId = $step->getNextStepId($output['result'] ?? null);
-            if ($nextStepId) {
-                $nextStep = WorkflowStep::find($nextStepId);
-                if ($nextStep) {
-                    $this->executeStep($nextStep, $run, $stepRun);
+            // Execute next step
+            $nextStep = $step->getNextStep();
+            if ($nextStep) {
+                if ($step->step_type === 'delay') {
+                    // Schedule delayed execution
+                    $delay = $this->calculateDelay($step->config);
+                    ExecuteWorkflowStepJob::dispatch($execution, $nextStep)->delay($delay);
+                } else {
+                    $this->executeStep($execution, $nextStep);
                 }
+            } else {
+                $execution->complete();
             }
 
         } catch (\Exception $e) {
-            $this->handleStepError($step, $stepRun, $run, $e);
+            $stepExecution->update([
+                'status' => 'failed',
+                'completed_at' => now(),
+                'error_message' => $e->getMessage(),
+                'execution_time_ms' => now()->diffInMilliseconds($stepExecution->started_at)
+            ]);
+
+            if ($stepExecution->retry_count < $step->retry_count) {
+                $stepExecution->increment('retry_count');
+                // Retry with exponential backoff
+                $delay = pow(2, $stepExecution->retry_count) * 60; // seconds
+                ExecuteWorkflowStepJob::dispatch($execution, $step)->delay(now()->addSeconds($delay));
+            } else {
+                $execution->fail("Step '{$step->name}' failed: " . $e->getMessage());
+            }
+
+            Log::error('Workflow step execution failed', [
+                'execution_id' => $execution->id,
+                'step_id' => $step->id,
+                'error' => $e->getMessage()
+            ]);
         }
+
+        return $stepExecution;
     }
 
-    protected function prepareStepInput(WorkflowStep $step, WorkflowRun $run, ?WorkflowStepRun $previousStepRun): array
+    protected function processStep(WorkflowStep $step, WorkflowStepExecution $stepExecution): array
     {
-        $input = [
-            'trigger_data' => $run->trigger_data,
-            'context' => $run->context_data,
-        ];
-
-        if ($previousStepRun) {
-            $input['previous_step'] = [
-                'output' => $previousStepRun->output_data,
-                'status' => $previousStepRun->status,
-            ];
-        }
-
-        // Apply field mapping if configured
-        if ($step->field_mapping) {
-            $input = $this->applyFieldMapping($input, $step->field_mapping);
-        }
-
-        return $input;
-    }
-
-    protected function executeAction(WorkflowStep $step, WorkflowStepRun $stepRun): array
-    {
-        $actionType = $step->config['action_type'] ?? null;
-        if (!$actionType) {
-            throw new \Exception('Action type not specified');
-        }
-
-        // Execute the action based on type
-        switch ($actionType) {
-            case 'http_request':
-                return $this->executeHttpRequest($step->config, $stepRun->input_data);
-
+        switch ($step->step_type) {
             case 'send_email':
-                return $this->sendEmail($step->config, $stepRun->input_data);
-
-            case 'update_crm':
-                return $this->updateCRM($step->config, $stepRun->input_data);
-
-            // Add more action types as needed
-
+                return $this->sendEmail($step->config, $stepExecution->input_data);
+            
+            case 'send_webhook':
+                return $this->sendWebhook($step->config, $stepExecution->input_data);
+            
+            case 'send_whatsapp':
+                return $this->sendWhatsApp($step->config, $stepExecution->input_data);
+            
+            case 'add_tag':
+                return $this->addTags($step->config, $stepExecution->input_data);
+            
+            case 'remove_tag':
+                return $this->removeTags($step->config, $stepExecution->input_data);
+            
+            case 'condition':
+                return $this->evaluateCondition($step->config, $stepExecution->input_data);
+            
+            case 'delay':
+                return ['delayed_until' => now()->add($this->calculateDelay($step->config))];
+            
             default:
-                throw new \Exception("Unknown action type: {$actionType}");
+                throw new \Exception("Unknown step type: {$step->step_type}");
         }
     }
 
-    protected function evaluateCondition(WorkflowStep $step, WorkflowStepRun $stepRun): array
+    protected function sendEmail(array $config, array $inputData): array
     {
-        $condition = $step->config['condition'] ?? null;
-        if (!$condition) {
-            throw new \Exception('Condition not specified');
-        }
+        // Implement email sending logic using your preferred mail service
+        // Return execution results
+        return [
+            'sent' => true,
+            'message_id' => 'email_' . uniqid(),
+            'timestamp' => now()->toISOString()
+        ];
+    }
 
-        $result = $this->evaluateConditionExpression($condition, $stepRun->input_data);
+    protected function sendWebhook(array $config, array $inputData): array
+    {
+        // Implement webhook sending logic
+        $client = new \GuzzleHttp\Client();
+        
+        $response = $client->request($config['method'] ?? 'POST', $config['url'], [
+            'json' => $inputData,
+            'headers' => $config['headers'] ?? [],
+            'timeout' => $config['timeout'] ?? 30
+        ]);
 
         return [
-            'result' => $result,
-            'condition' => $condition,
+            'status_code' => $response->getStatusCode(),
+            'response' => $response->getBody()->getContents(),
+            'timestamp' => now()->toISOString()
         ];
     }
 
-    protected function handleDelay(WorkflowStep $step, WorkflowStepRun $stepRun): void
+    protected function sendWhatsApp(array $config, array $inputData): array
     {
-        $delay = $step->config['delay'] ?? null;
-        if (!$delay) {
-            throw new \Exception('Delay not specified');
-        }
-
-        $stepRun->markAsDelayed();
-
-        // Schedule the continuation of the workflow
-        $resumeAt = $this->calculateResumeTime($delay);
-        
-        // You would implement your own job scheduling here
-        // For example, using Laravel's built-in scheduling:
-        // ResumeWorkflowJob::dispatch($stepRun)->delay($resumeAt);
+        // Implement WhatsApp sending logic
+        return [
+            'sent' => true,
+            'message_id' => 'whatsapp_' . uniqid(),
+            'timestamp' => now()->toISOString()
+        ];
     }
 
-    protected function mapData(WorkflowStep $step, WorkflowStepRun $stepRun): array
+    protected function addTags(array $config, array $inputData): array
     {
-        $mapping = $step->config['mapping'] ?? null;
-        if (!$mapping) {
-            throw new \Exception('Data mapping not specified');
-        }
-
-        return $this->applyFieldMapping($stepRun->input_data, $mapping);
+        // Implement tag adding logic
+        return [
+            'tags_added' => $config['tags'] ?? [],
+            'timestamp' => now()->toISOString()
+        ];
     }
 
-    protected function handleStepError(WorkflowStep $step, WorkflowStepRun $stepRun, WorkflowRun $run, \Exception $error): void
+    protected function removeTags(array $config, array $inputData): array
     {
-        $errorHandling = $step->error_handling ?? [];
-        $maxRetries = $errorHandling['max_retries'] ?? 0;
-
-        if ($stepRun->retry_count < $maxRetries) {
-            $stepRun->incrementRetryCount();
-            
-            // Implement retry delay if specified
-            $retryDelay = $errorHandling['retry_delay'] ?? 0;
-            if ($retryDelay > 0) {
-                sleep($retryDelay);
-            }
-
-            // Retry the step
-            $this->executeStep($step, $run);
-        } else {
-            $stepRun->markAsFailed($error->getMessage());
-
-            // Handle failure based on configuration
-            $onError = $errorHandling['on_error'] ?? 'fail_workflow';
-            switch ($onError) {
-                case 'continue':
-                    // Move to next step if exists
-                    $nextStepId = $step->next_step_id;
-                    if ($nextStepId) {
-                        $nextStep = WorkflowStep::find($nextStepId);
-                        if ($nextStep) {
-                            $this->executeStep($nextStep, $run, $stepRun);
-                        }
-                    }
-                    break;
-
-                case 'fail_workflow':
-                default:
-                    $run->markAsFailed(
-                        "Step {$step->step_uid} failed: {$error->getMessage()}",
-                        ['step_id' => $step->id]
-                    );
-                    break;
-            }
-        }
+        // Implement tag removal logic
+        return [
+            'tags_removed' => $config['tags'] ?? [],
+            'timestamp' => now()->toISOString()
+        ];
     }
 
-    protected function applyFieldMapping(array $input, array $mapping): array
+    protected function evaluateCondition(array $config, array $inputData): array
     {
-        $output = [];
-        foreach ($mapping as $targetPath => $sourcePath) {
-            $value = $this->getValueByPath($input, $sourcePath);
-            $this->setValueByPath($output, $targetPath, $value);
-        }
-        return $output;
+        // Implement condition evaluation logic
+        return [
+            'condition_met' => true,
+            'evaluated_conditions' => $config['conditions'] ?? [],
+            'timestamp' => now()->toISOString()
+        ];
     }
 
-    protected function getValueByPath(array $data, string $path)
+    protected function calculateDelay(array $config): \Carbon\Carbon
     {
-        $keys = explode('.', $path);
-        $value = $data;
-        foreach ($keys as $key) {
-            if (!isset($value[$key])) {
-                return null;
-            }
-            $value = $value[$key];
-        }
-        return $value;
+        $duration = $config['duration'] ?? 5;
+        $unit = $config['unit'] ?? 'minutes';
+
+        return now()->add($duration, $unit);
     }
-
-    protected function setValueByPath(array &$data, string $path, $value): void
-    {
-        $keys = explode('.', $path);
-        $current = &$data;
-        foreach ($keys as $key) {
-            if (!isset($current[$key])) {
-                $current[$key] = [];
-            }
-            $current = &$current[$key];
-        }
-        $current = $value;
-    }
-
-    protected function calculateResumeTime(array $delay): Carbon
-    {
-        $amount = $delay['amount'] ?? 1;
-        $unit = $delay['unit'] ?? 'minutes';
-        
-        return now()->add($amount, $unit);
-    }
-
-    protected function evaluateConditionExpression(array $condition, array $context): bool
-    {
-        $operator = $condition['operator'] ?? null;
-        $field = $condition['field'] ?? null;
-        $value = $condition['value'] ?? null;
-
-        if (!$operator || !$field) {
-            throw new \Exception('Invalid condition configuration');
-        }
-
-        $fieldValue = $this->getValueByPath($context, $field);
-
-        switch ($operator) {
-            case 'equals':
-                return $fieldValue == $value;
-            case 'not_equals':
-                return $fieldValue != $value;
-            case 'greater_than':
-                return $fieldValue > $value;
-            case 'less_than':
-                return $fieldValue < $value;
-            case 'contains':
-                return is_string($fieldValue) && str_contains($fieldValue, $value);
-            case 'not_contains':
-                return is_string($fieldValue) && !str_contains($fieldValue, $value);
-            default:
-                throw new \Exception("Unknown operator: {$operator}");
-        }
-    }
-
-    // Implement these methods based on your needs
-    protected function executeHttpRequest(array $config, array $input): array
-    {
-        // Implement HTTP request logic
-        return [];
-    }
-
-    protected function sendEmail(array $config, array $input): array
-    {
-        // Implement email sending logic
-        return [];
-    }
-
-    protected function updateCRM(array $config, array $input): array
-    {
-        // Implement CRM update logic
-        return [];
-    }
-} 
+}

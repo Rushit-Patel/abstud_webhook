@@ -24,15 +24,20 @@ export const useWorkflowState = ({ initialWorkflows, initialWorkflowId }: UseWor
         }
     }, [initialWorkflowId, workflows]);
 
-    const filteredWorkflows = workflows.filter(workflow => {
-        const matchesSearch = workflow.name.toLowerCase().includes(searchTerm.toLowerCase());
-        const matchesStatus = filterStatus === 'all' || 
-            (filterStatus === 'active' && workflow.is_active) ||
-            (filterStatus === 'inactive' && !workflow.is_active);
-        
-        return matchesSearch && matchesStatus;
-    });
+    let filteredWorkflows: Workflow[] = [];
 
+    if (Array.isArray(workflows)) {
+        filteredWorkflows = workflows.filter(workflow => {
+            const matchesSearch = workflow.name.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesStatus = filterStatus === 'all' || 
+                (filterStatus === 'active' && workflow.is_active) ||
+                (filterStatus === 'inactive' && !workflow.is_active);
+            
+            return matchesSearch && matchesStatus;
+        });
+    } else {
+        filteredWorkflows = [] as Workflow[];
+    }
     const openDeleteDialog = useCallback((id: number) => {
         setWorkflowToDelete(id);
         setIsDeleteDialogOpen(true);
