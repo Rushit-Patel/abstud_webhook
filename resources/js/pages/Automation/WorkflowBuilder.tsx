@@ -605,6 +605,7 @@ const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({ initialWorkflow, onSa
                                 selectedTrigger={workflow.trigger}
                                 onChange={handleTriggerSelect}
                                 onClose={() => setIsSidebarOpen(false)}
+                                workflowId = {workflowId}
                             />
                         )}
                         {selectedNodeType === 'action' && (

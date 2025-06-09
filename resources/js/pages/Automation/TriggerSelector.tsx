@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import axios from 'axios';
+import { router } from '@inertiajs/react';
 
 interface TriggerOption {
     id: string;
@@ -45,6 +46,7 @@ interface TriggerSelectorProps {
     selectedTrigger?: Trigger;
     onClose: () => void;
     onChange: (trigger: Trigger) => void;
+    workflowId?: string;
 }
 
 interface FacebookPage {
@@ -109,14 +111,15 @@ const leadStatuses = [
     { value: 'nurturing', label: 'Nurturing' },
 ];
 
-const TriggerSelector: React.FC<TriggerSelectorProps> = ({ selectedTrigger, onClose, onChange }) => {
+const TriggerSelector: React.FC<TriggerSelectorProps> = ({ selectedTrigger, onClose, onChange, workflowId }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedCategory, setSelectedCategory] = useState<'all' | 'leads' | 'integrations'>('all');
     const [currentStep, setCurrentStep] = useState<'select' | 'configure'>('select');
     const [selectedTriggerOption, setSelectedTriggerOption] = useState<TriggerOption | null>(null);
     const [triggerConfig, setTriggerConfig] = useState<Partial<Trigger>>(selectedTrigger || { type: '', config: {} });
     const [validationErrors, setValidationErrors] = useState<string[]>([]);
-
+    const [isSaving, setIsSaving] = useState(false);
+    
     // Facebook Integration States
     const [facebookPages, setFacebookPages] = useState<FacebookPage[]>([]);
     const [facebookForms, setFacebookForms] = useState<FacebookForm[]>([]);
@@ -289,17 +292,65 @@ const TriggerSelector: React.FC<TriggerSelectorProps> = ({ selectedTrigger, onCl
         return errors;
     };
 
-    const handleSave = useCallback(() => {
+    const handleSave = useCallback(async () => {
         const errors = validateConfiguration();
-
         if (errors.length > 0) {
             setValidationErrors(errors);
             return;
         }
+        setIsSaving(true);
+        setValidationErrors([]);
 
-        onChange(triggerConfig as Trigger);
-        onClose();
-    }, [triggerConfig, onChange, onClose]);
+        try {
+            // Prepare trigger data for backend
+            const triggerData = {
+                trigger_name: selectedTriggerOption?.name || triggerConfig.type,
+                trigger_type: triggerConfig.type,
+                trigger_conditions: triggerConfig.config || {},
+                config: triggerConfig.config || {},
+                priority: 100,
+                cooldown_seconds: 0,
+                field_mappings: []
+            };
+
+            // Make API call to save trigger
+            const response = await axios.post(
+                route('automation.workflows.triggers.store', { workflow: workflowId }),
+                triggerData
+            );
+
+            // Update frontend state
+            onChange(triggerConfig as Trigger);
+            
+            // Show success message
+            const webhookUrl = response.data.webhook_url;
+            if (webhookUrl) {
+                // You might want to show the webhook URL to the user
+                console.log('Generated webhook URL:', webhookUrl);
+            }
+
+            // Close the selector
+            onClose();
+
+            // Optionally refresh the page or update parent component
+            // router.reload({ only: ['workflow'] });
+
+        } catch (error: any) {
+            console.error('Error saving trigger:', error);
+            
+            const errorMessage = error.response?.data?.message || 'Failed to save trigger';
+            setValidationErrors([errorMessage]);
+            
+            // If it's a validation error, show specific field errors
+            if (error.response?.data?.errors) {
+                const fieldErrors = Object.values(error.response.data.errors).flat();
+                setValidationErrors(fieldErrors as string[]);
+            }
+        } finally {
+            setIsSaving(false);
+        }
+    }, [triggerConfig, onChange, onClose, workflowId, selectedTriggerOption]);
+
 
     const handleBack = useCallback(() => {
         setCurrentStep('select');
@@ -789,12 +840,30 @@ const TriggerSelector: React.FC<TriggerSelectorProps> = ({ selectedTrigger, onCl
             {currentStep === 'configure' && (
                 <div className="border-t bg-gray-50 p-4 flex-shrink-0">
                     <div className="flex gap-2">
-                        <Button variant="outline" onClick={handleBack} className="flex-1">
+                        <Button 
+                            variant="outline" 
+                            onClick={handleBack} 
+                            className="flex-1"
+                            disabled={isSaving}
+                        >
                             Back
                         </Button>
-                        <Button onClick={handleSave} className="flex-1 bg-blue-600 text-white hover:bg-blue-700">
-                            <Save className="mr-2 h-4 w-4" />
-                            Save Trigger
+                        <Button 
+                            onClick={handleSave} 
+                            className="flex-1 bg-blue-600 text-white hover:bg-blue-700"
+                            disabled={isSaving}
+                        >
+                            {isSaving ? (
+                                <>
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    Saving...
+                                </>
+                            ) : (
+                                <>
+                                    <Save className="mr-2 h-4 w-4" />
+                                    Save Trigger
+                                </>
+                            )}
                         </Button>
                     </div>
                 </div>
